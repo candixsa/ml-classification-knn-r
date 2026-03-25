@@ -1,0 +1,240 @@
+---
+title: "PEC 1: Predicción de la estructura secundaria de proteínas mediante k-NN"
+author: "Candela Sánchez Alvarez"
+date: "`r format(Sys.Date(),'%e de %B, %Y')`"
+output: 
+  pdf_document: 
+    toc: yes
+bibliography: scholar.bib
+---
+
+```{r libraries, message=FALSE, echo=FALSE }
+library(tidyr)
+library(tidyverse)
+library(class)
+library(gmodels)
+library(smallstuff)
+library(tibble)
+library(dplyr)
+library(caret)
+library(pROC)
+```
+
+\newpage
+
+# 1. Introducción
+
+La estructura secundaria de las proteínas se define como la organización local de la cadena de aminoácidos, que constituye la base de su estructura tridimensional y, en consecuencia, de su función biológica. Las formas más comunes de esta organización son la hélice alfa, con estructura en espiral, la lámina beta, con forma de hoja plegada, y las regiones coil, que corresponden a zonas sin una estructura regular definida [@alberts2002molecular]. La predicción de esta estructura secundaria representa uno de los desafíos más importantes en el ámbito de la bioinformática, ya que actúa como un puente intermedio esencial para comprender la configuración espacial completa de una proteína. Esta capacidad supone una revolución para el descubrimiento de fármacos y la biología molecular, ya que permite a los investigadores identificar con precisión los sitios de unión de los fármacos y predecir cómo las mutaciones genéticas podrían comprometer la estabilidad de las proteínas [@jumper2021alphafold].
+
+El Machine Learning ofrece una solución necesaria a los elevados costes y la complejidad de la cristalografía de rayos X. Al deducir patrones a partir de secuencias de aminoácidos sin depender de homólogos conocidos, estas herramientas cubren una laguna fundamental en la biología estructural. Aunque AlphaFold domina el panorama del modelado 3D, los enfoques algorítmicos clásicos siguen siendo los preferidos para analizar las propensiones locales de alta resolución de los segmentos proteicos [@jumper2021alphafold].
+
+Este estudio utiliza el algoritmo k-Nearest Neighbors (k-NN) como método de clasificación. Al tratarse de un modelo de aprendizaje no paramétrico y basado en instancias, el k-NN clasifica una nueva secuencia de aminoácidos identificando los *k* ejemplos más cercanos en un espacio multidimensional. Al aprovechar un sistema de votación por mayoría entre estos vecinos, el modelo representa eficazmente los patrones estructurales locales de las secuencias proteicas.
+
+El objetivo principal de esta investigación es llevar a cabo una evaluación experimental exhaustiva de k-NN en la predicción de estructuras secundarias, utilizando un conjunto de datos procesado mediante ventanas deslizantes de 17 residuos. Este análisis se centra en identificar el hiperparámetro óptimo *k*, al tiempo que se valida rigurosamente la precisión predictiva y la fiabilidad estadística del modelo. 
+
+# 2. Datos
+
+El conjunto de datos utilizados en este estudio provienen del dataset Molecular Biology (Protein Secondary Structure) del repositorio UCI [@molecular_biology_protein_secondary_structure_68]. Estos datos, que estan disponibles en el fichero data4.csv, contienen información sobre las secuencias de 17 aminoácidos obtenidas a partir de proteínas y la estructura secundaria del aminoácido central (posición 9) que se clasifica en tres categorías: hélice alfa (h), lámina beta (e) y regiones de tipo coil (\_).
+
+```{r data, include=FALSE}
+# Cargamos los datos csv
+datos <- read.csv("data4.csv", sep=";", stringsAsFactors = TRUE)
+# Estructura de los datos
+str(datos)
+# Covertimos la variable 18 es un factor
+datos$V18 <- as.factor(datos$V18)
+```
+
+Los datos siguen una estructura de ventana deslizante de 17 posiciones para capturar el contexto local de cada aminoácido dentro de la secuencia proteica. La conformación de un aminoácido está fuertemente influenciada por los residuos vecinos. El tamaño de esta ventana deslizante permite al algoritmo identificar patrones de plegamiento que no son visibles si se analizan los aminoácidos aislados [@inproceedings].
+
+Al ser los aminoácidos variables categóricas, se realiza una codificación one-hot, debido a que el algoritmo K-NN solo calcula las distancias numéricas y no puede procesar directamente las letras de los aminoácidos. Siguiendo lo que dice @lantz2015ml, la codificación one-hot transforma cada aminoácido en columnas binarias en las cuales una posición toma el número 1 y el resto 0, haciendo que cada secuencia de aminoácido se transforme en un vector de alta dimensionalidad.
+
+```{r one-hot, echo=FALSE, warning=FALSE, include=FALSE}
+# Transformamos las letras en números 
+dummy <- dummyVars(~., data=datos[,-18])
+datos_num <- data.frame(predict(dummy, newdata=datos))
+# Unimos los datos numericos con la variable 18
+datos_finales <-cbind(datos_num, Clase=datos$V18)
+# Observamos la dimension
+dim(datos_finales)
+```
+
+Tras la codificación, el conjunto de datos ha pasado de tener 18 variables originales a aproximadamente 340 variables numéricas (sin contar la columna "Clase"), manteniendo las 10000 observaciones originales.
+
+Antes de aplicar el algoritmo se debe evaluar si las estructuras secundarias están equilibradas. Normalmente la estructura secundaria de proteínas, las regiones *coil*, son las mayoritarias. 
+
+```{r tabla, grafica, echo=FALSE, fig.cap="Gráfico de barras de la distribución de clases.", fig.width=3.5, fig.height=2.5}
+# Creamos una tabla con frecuencias 
+tabla_clase <- as.data.frame(table(datos$V18))
+colnames(tabla_clase) <- c("Clase", "Frecuencia")
+# Representamos la tabla
+knitr::kable(tabla_clase,
+             caption = "Distribución de clases")
+# Creamos un gráfico de barras de la distribución de class
+ggplot(tabla_clase, aes(x= Clase, y=Frecuencia, fill = Clase))+
+  geom_bar(stat = "identity", width=0.5)+
+  theme_minimal(base_size = 8)+
+  labs(title="Distribución de clases", x="Clase", y="Frecuencia")
+```
+
+En la Tabla 1 se puede observar que la estructura secundaria que más predomina es la región *coil*, seguida de las hélices y las láminas. Ademas, en el gráfico de barras (Figura 1) se puede observar de manera más clara que la región *coil* es la que predomina frente a las demás, confirmando la existencia de un desequilibrio en el conjunto de datos.
+
+# 3. Métodos
+
+## 3.1. Algoritmo
+
+El algoritmo utilizado en este estudio es el algoritmo K-Nearest Neighbors (K-NN), el cual obtiene su nombre por utilizar información sobre los vecinos *k* más cercanos de un ejemplo para clasificar ejemplos sin etiquetar. Es un método de clasificación que no necesita entrenamiento.
+
+Para localizar a los vecinos más cercanos se requiere un función de distancia o formula que mida la similitud entre las dos instancias. Normalmente, este algoritmo utiliza la distancia euclídea, calculando la distancia entre dos vectores *P* y *Q* [@lantz2015ml].
+
+$$d(P, Q) = \sqrt{\sum_{i=1}^{n} (p_i - q_i)^2}$$
+
+Finalmente, el hiperparámetro *k* juega un papel muy importante en el rendimiento del modelo. Un valor pequeño de *k* hace que el modelo sea sensible al ruido dando lugar a una alta varianza, mientras que un valor de *k* elevado hace que el modelo sea más estable, pero menos preciso, ya que puede llegar a ignorar patrones locales importantes dando lugar a un sesgo elevado [@james2021introduction].
+
+## 3.2. Diseño experimental
+
+Para evaluar el rendimiento del modelo, el conjunto de datos se divide en dos: un conjunto de entrenamiento que cuenta con el 80% de los datos y un conjunto de prueba que cuenta con el 20% restante. Esta división permite entrenar el algoritmo con una parte de los datos y evaluar su capacidad de predicción con el test. Además, esta división asegura que tanto el conjunto de entrenamiento como el de prueba tengan las misma proporción de hélices, láminas y coil, evitando sesgos en la evaluación [@kuhn2013applied].
+
+```{r partición datos, echo=FALSE}
+set.seed(123) # Reproduccibilidad
+# Partimos el dataset en 80% entrenamiento y 20% prueba
+indices<- createDataPartition(datos_finales$Clase, p=0.8, list = FALSE)
+# Dividimos el dataset en entrenamiento y prueba
+entrenam_x <- datos_finales[indices, -ncol(datos_finales)]
+prueba_x  <- datos_finales[-indices, -ncol(datos_finales)]
+entrenam_y <- datos_finales$Clase[indices]
+prueba_y  <- datos_finales$Clase[-indices]
+```
+
+Se evalúan distintos valores del parámetro *k* (1, 3, 5 y 7) siendo estos impares para evitar empates cuando los vecinos votan por una estructura u otra.
+
+```{r valores de k, echo=FALSE}
+# Definimos los valores de k
+valores_k <- c(1, 3, 5, 7)
+# Creamos una data.frame para guardar los diferente resutados de k
+resultados <- data.frame()
+```
+
+## 3.3. Métricas de evaluación
+
+Al haber muchos más coils que láminas o hélices, debemos realizar las siguientes métricas de evaluación, porque el porcentaje total de aciertos no es fiable:
+
+- La matriz de confunsión que permite analizar los falsos negativos y positivos. Es fundamental para ver si el modelo confunde las estructuras que son similares como las hélices y las láminas [@lantz2015ml].
+
+- El estadístico Kappa que permite evaluar la concoordancia entre dos evaluadores, la predicción y la realidad, ajustando el efecto del azar. @kuhn2013applied indica que la estadística puede tomar valores entre -1 y 1; un valor de 0 significa que no hay concordancia entre las clases observadas y predichas, mientras que un valor de 1 indica una concordancia perfecta entre la predicción del modelo y las clases observadas. Los valores negativos indican que la predicción se encuentra en la dirección opuesta a la realidad, pero los valores negativos grandes rara vez ocurren al trabajar con modelos predictivos.
+
+- Las curvas ROC permiten evaluar la capacidad de un modelo de clasificación para distinguir entre clases. Se construyen representando la sensibilidad (tasa de verdaderos positivos) frente a la tasa de falsos positivos (1-especificidad). El área bajo la curva (AUC) resumen esta capacidad de distinguir entre clases en un único valor, donde los valores cercanos a 1 indican un buen rendimiento [@lantz2015ml; @kuhn2013applied].
+
+# 4. Resultados
+
+En este apartado se van a presentar los resultados obtenidos tras la aplicación del algoritmo k-NN sobre el conjunto de datos de secuencias de aminoácidos.
+
+Tras analizar los valores de *k* propuestos, en la Tabla 2 se puede observar que el rendimiento máximo se obtiene con *k=1*, obteniendo uan precisión global de 0.78 y un estadístico Kappa de 0.62.
+
+```{r tablas comparacion, echo=FALSE}
+# Bucle para entrenar y evaluar cada valor de k
+for (k_valores in valores_k){
+  # Ejecutamos el algoritmo
+  prediccion <- knn(train = entrenam_x, test=prueba_x, cl= entrenam_y, k=k_valores)
+  # Calculamos la matriz de confusion
+  matriz_confusion<- confusionMatrix(prediccion, prueba_y)
+  # Almacenamos la precisión global (accuracy) y Kappa para hacer la comparacion
+  resultados<- rbind(resultados, data.frame(k=k_valores, Accuracy=matriz_confusion$overall['Accuracy'], Kappa=matriz_confusion$overall['Kappa'], row.names = NULL))
+}
+# Mostramos la tabla de resultados
+knitr::kable(resultados, digits=4, caption = "Comparación de métricas según el valor de k")
+```
+
+A medida que aumenta el valor de *k*, se produce un descenso tanto en la precisión global como en Kappa. 
+
+```{r grafico accuracy vs kappa, echo=FALSE, fig.cap="Gráfico de líneas que muestra la comparación de las métricas de rendimiento para distintos valores de k.", fig.width=3.5, fig.height=3}
+# Grafico Accuracy 
+plot(resultados$k, resultados$Accuracy, type = "b", pch = 19, col = "blue",
+     ylim = c(0,1),
+     main = "Rendimiento del modelo según el valor de k",
+     xlab = "Valor de k", ylab = "Rendimiento",
+     cex.main = 0.9, cex.lab=0.7, cex.axis=0.6)
+
+# Añadimos el Kappa para comparar
+lines(resultados$k, resultados$Kappa, type = "b", pch = 15, col = "red")
+grid()
+# Añadimos la leyenda
+legend("bottomright", legend=c("Accuracy", "Kappa"), 
+       col=c("blue", "red"), pch=c(19, 15), bty = "n", cex = 0.6)
+```
+
+En el gráfico de rendimiento (Figura 2), se puede observar claramente como la precisión desciende hasta 0.64 y el Kappa hasta 0.32 cuando *k=7*.
+
+```{r AUC, echo=FALSE, message=FALSE}
+# Ejecutamos el modelo con el mejor k, en este caso, k=1
+mejor_pred <- knn(train = entrenam_x, test=prueba_x, cl=entrenam_y, k=1)
+# Calculamos la matriz de confusion 
+matriz_conf_final <- confusionMatrix(mejor_pred, prueba_y)
+# Calculamos el AUC multiclase
+roc_multi <- multiclass.roc(as.numeric(prueba_y), as.numeric(mejor_pred))
+auc_valor <- auc(roc_multi)
+```
+
+Para el calculo del área bajo la curva se ha seleccionado *k=1*, obteniendo un valor de 0.79. 
+
+Al observar las curvas ROC por estructura (Figura 3), se puede apreciar que hay un comportamiento diferente dependiendo de la estructura, siendo la curva de las láminas beta la que menor área presenta debido a que su estructura es la más dificil de predecir para el algoritmo. 
+
+```{r grafico ROC, echo=FALSE, message=FALSE, fig.cap="Gráfico de curvas ROC para cada estructura secundaria siendo *k=1*.", fig.width=3.5, fig.height=2.5}
+# Para visualizar, hacemos un gráfico de la comparación de una clase contra el resto (ej. hélice)
+roc_helice <- roc(ifelse(prueba_y == "h", 1, 0), as.numeric(mejor_pred == "h"))
+roc_lamina <- roc(ifelse(prueba_y == "e", 1, 0), as.numeric(mejor_pred == "e"))
+roc_coil   <- roc(ifelse(prueba_y == "_", 1, 0), as.numeric(mejor_pred == "_"))
+
+plot(roc_helice, col="blue", main="Curvas ROC por estructura (k=1)", cex.main = 0.9, cex.lab=0.7, cex.axis=0.6, legacy.axes=TRUE)
+lines(roc_lamina, col="red")
+lines(roc_coil, col="green")
+legend("bottomright", legend=c("Hélice (h)", "Lámina (e)", "Coil (_)"), 
+       col=c("blue", "red", "green"), lwd=2, cex = 0.6)
+```
+
+Finalmente, en la Tabla 3, se puede observar la matriz de confusión para k=1, donde hay falsos negativos debido a que 83 láminas y 102 hélices son clasificadas como regiones sin estructura definida y falsos positivos porque el algoritmo asignó la etiqueta hélice a 98 casos que eran coils, y la etiqueta de lámina a 96 casos de coil.
+
+```{r matriz confusion, echo=FALSE}
+knitr::kable(matriz_conf_final$table, caption = "Matriz de confusión cuando *k=1*")
+```
+
+# 5. Discusión
+
+El análisis muestra que el mejor rendimiento se obtiene con *k=1*, lo que indica que el modelo aprovecha muy bien la información local de la secuencia de aminoácidos.
+
+A medida que el valor de *k* aumenta, disminuyen los valores de la precisión y del estadístico Kappa. Al considerar más vecinos, el modelo tiende a predecir más coils, la estructura más frecuente, sin tener en cuenta las estructuras hélice y lámina, que son menos comunes. Estos resultados concuerdan con @james2021introduction, que sugiere que valores elevados de *k* hace que el modelo pierda capacidad para distinguir entre estructuras y que se deje llevar por la mayoría.
+
+Los resultados de las curvas ROC y del valor de AUC (0.79) indican que el modelo tiene capacidad de discriminación aceptable. En el gráfico por estructura, se obserma que las láminas beta se encuentras más cercas a la diagonal, por lo que su área es más pequeña. Esto demuestra que para el modelo es dificil distinguir las estructuras que no son tan frecuentes debido a que los patrones de aminoácidos no son muy claros, sobretodo cuando en las proteínas el plegamiento depende de contactos que no estan al alcanza de la ventana destilante analizada. Todo esto se puede observar en la matriz de confusión que confirma que las láminas beta representa el mayor reto para el modelo con 251 aciertos. 
+
+En definitiva, aunque los valores de predicción sean altos, el Kappa y el AUC muestran una visión más realista, el modelo tiene problemas para identificar las estructuras menos frecuentes. Todo esto ocurre debido a que la mayoria de los plegamientos dependen de contactos que la ventana deslizante no puede ver.
+
+# 6. Conclusiones
+
+Tras la realización de este estudio con el algoritmo k-NN se han llegado a las siguientes conclusiones:
+
+- El modelo alcanza su rendimiento óptimo cuando valor de *k* es 1, indicando que la estructura secundaria de las proteínas dependen de patrones de aminoácidos específicos y locales.
+
+- El desequilibrio de las estructuras dificulta la identificación de las estructuras menos representados como las láminas beta.
+
+- El algoritmo k-NN da lugar a resultados aceptables, pero la predicción de contactos a larga distancia, sugiere el uso de métodos de mayor alcance o más avanzados para mejorar la predicción.
+
+\newpage
+
+# 7. Bibliografía
+
+- @alberts2002molecular: Utilizada para proporcionar información sobre la estructura secundaria de las proteínas.
+
+- @inproceedings: Utilizada para justificar el uso de las ventanas deslizantes y cómo los vecinos influyen en la precisión de predicción de la estructura secundaria.
+
+- @james2021introduction: Utilizada para explicar la elección del valor de k y como interpretarlo.
+
+- @jumper2021alphafold: Utilizada para tener una visión bioinformática del estudio.
+
+- @kuhn2013applied: Utilizado para entender el impacto del desiquilibrio de clases en modelos predictivos y las métricas de evaluación (Kappa, AUC, ROC).
+
+- @lantz2015ml: Utilizado para comprender la aplicación del algoritmo k-NN y las métricas de evaluación.
+
+- @molecular_biology_protein_secondary_structure_68: Fuente original del conjunto de datos utilizados (data4.csv)
+
+::: {#refs}
+:::
